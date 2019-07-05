@@ -58,6 +58,8 @@ type Callback func(key, val interface{})
 // SetUpdateThreshold).
 type Cache struct {
 	size            int
+	cap				int
+	
 	ttl             time.Duration
 	ttlMargin       time.Duration
 	workers         int
@@ -94,9 +96,9 @@ type Option func(c *Cache)
 // SetSize sets the cache size. This is the maximum number of items the
 // cache can hold before calls to Add cause the least recently used item
 // to be evicted.
-func SetSize(size int) Option {
+func SetCap(cap int) Option {
 	return func(c *Cache) {
-		c.size = size
+		c.cap = cap
 	}
 }
 
@@ -208,7 +210,9 @@ func SetUpdateFunc(update UpdateFunc) Option {
 // stopped via a call to Stop.
 func NewCache(options ...Option) (*Cache, error) {
 	c := &Cache{
-		size:            DefaultSize,
+		cap:            DefaultSize,
+		size:			0,
+		
 		ttl:             DefaultTTL,
 		ttlMargin:       DefaultTTLMargin,
 		workers:         DefaultWorkers,
@@ -227,7 +231,7 @@ func NewCache(options ...Option) (*Cache, error) {
 		option(c)
 	}
 
-	if c.size <= 0 {
+	if c.cap <= 0 {
 		return nil, errors.New("Cache size must be positive")
 	}
 	if c.ttl <= 0 {
@@ -258,19 +262,22 @@ func NewCache(options ...Option) (*Cache, error) {
 
 	return c, nil
 }
+/* 
+*  size is MB
+*/
 
 // Add inserts an entry into the cache with the specified key and value. If
 // the cache is full (see SetSize), this will cause an eviction of the least
 // recently used item. Returns a boolean indicating whether or not an eviction
 // occurred.
-func (c *Cache) Add(key, val interface{}) (evicted bool) {
+func (c *Cache) Add(key, val int, size int) (evicted bool) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
 	// Check for existing item
 	if e, ok := c.items[key]; ok {
-		e.val = val
-		e.hits = 0
+//		e.val = val
+//		e.hits = 0
 		e.expiration = time.Now().Add(c.ttl)
 		c.evtMoveToFront(e)
 		c.expMoveToFront(e)
@@ -289,7 +296,7 @@ func (c *Cache) Add(key, val interface{}) (evicted bool) {
 	c.items[key] = e
 
 	// Verify size not exceeded, evict an entry if needed
-	if len(c.items) > c.size {
+	if c.size + size > c.cap {
 		c.evict()
 		return true
 	}
@@ -299,13 +306,17 @@ func (c *Cache) Add(key, val interface{}) (evicted bool) {
 // Get returns the value corresponding to the provided key, if it exists in
 // the cache. Also returns a boolean indicating whether or not it exists.
 // The item's position in the list of recently-used items is updated.
-func (c *Cache) Get(key interface{}) (val interface{}, ok bool) {
+func (c *Cache) Get(key interface{}) (val int, ok bool) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
 	if e, ok := c.items[key]; ok {
 		e.hits++
+		
+		e.expiration = time.Now().Add(c.ttl)
+		c.expMoveToFront(e)
 		c.evtMoveToFront(e)
+		
 		return e.val, true
 	}
 	return nil, false
@@ -326,7 +337,7 @@ func (c *Cache) Contains(key interface{}) (ok bool) {
 // Peek returns the value corresponding to the provided key, if it exists in
 // the cache. Also returns a boolean indicating whether or not it exists. The
 // item's position in the list of recently-used items is not updated (see Get).
-func (c *Cache) Peek(key interface{}) (val interface{}, ok bool) {
+func (c *Cache) Peek(key interface{}) (val int, ok bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
@@ -345,6 +356,7 @@ func (c *Cache) Remove(key interface{}) (ok bool) {
 
 	if e, ok := c.items[key]; ok {
 		c.remove(e)
+		c.size -= e.val
 		return true
 	}
 	return false
@@ -366,11 +378,11 @@ func (c *Cache) Keys() []interface{} {
 }
 
 // Len returns the number of items currently in the cache.
-func (c *Cache) Len() int {
+func (c *Cache) Size() int {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
-	return len(c.items)
+	return c.size
 }
 
 // Purge removes all items from the cache, resets the lists of
@@ -387,6 +399,7 @@ func (c *Cache) Purge() {
 
 	// Drain update chan
 	c.drainUpdates()
+	c.size = 0
 
 	// Drop all items from evict and expiration lists
 	c.evtRoot.evtNext = &c.evtRoot
@@ -559,7 +572,7 @@ func (c *Cache) evict() {
 func (c *Cache) remove(e *entry) {
 	evtRemove(e)
 	expRemove(e)
-	delete(c.items, e.key)
+	delete(c.items, e.key, e.val)
 }
 
 func (c *Cache) evtBack() *entry {
