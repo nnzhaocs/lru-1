@@ -45,7 +45,7 @@ type UpdateFunc func(key interface{}) (newVal interface{}, status Status)
 // or that the update buffer is full (a sign that the workers were not able
 // to update the items as fast as they were expiring). See SetOnEvict,
 // SetOnExpire, and SetOnBufferFull.
-type Callback func(key, val interface{})
+type Callback func(key interface{}, val string)
 
 // Cache is a thread-safe fixed-size LRU cache with a single worker goroutine
 // that checks for expired items (see SetTTL and SetTTLMargin). If an
@@ -84,6 +84,7 @@ type entry struct {
 	key              interface{}
 	val              interface{}
 	hits             int
+	size			 int
 	expiration       time.Time
 	evtNext, evtPrev *entry
 	expNext, expPrev *entry
@@ -270,7 +271,7 @@ func NewCache(options ...Option) (*Cache, error) {
 // the cache is full (see SetSize), this will cause an eviction of the least
 // recently used item. Returns a boolean indicating whether or not an eviction
 // occurred.
-func (c *Cache) Add(key, val int, size int) (evicted bool) {
+func (c *Cache) Add(key, val interface{}) (evicted bool, exisited bool) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -281,13 +282,14 @@ func (c *Cache) Add(key, val int, size int) (evicted bool) {
 		e.expiration = time.Now().Add(c.ttl)
 		c.evtMoveToFront(e)
 		c.expMoveToFront(e)
-		return false
+		return false, true
 	}
 
 	// Add new item
 	e := &entry{
 		key:        key,
 		val:        val,
+		size:		size,
 		hits:       0,
 		expiration: time.Now().Add(c.ttl),
 	}
@@ -298,15 +300,15 @@ func (c *Cache) Add(key, val int, size int) (evicted bool) {
 	// Verify size not exceeded, evict an entry if needed
 	if c.size + size > c.cap {
 		c.evict()
-		return true
+		return true, false
 	}
-	return false
+	return false, false
 }
 
 // Get returns the value corresponding to the provided key, if it exists in
 // the cache. Also returns a boolean indicating whether or not it exists.
 // The item's position in the list of recently-used items is updated.
-func (c *Cache) Get(key interface{}) (val int, ok bool) {
+func (c *Cache) Get(key interface{}) (val interface{}, ok bool) {
 	c.lock.Lock()
 	defer c.lock.Unlock()
 
@@ -337,7 +339,7 @@ func (c *Cache) Contains(key interface{}) (ok bool) {
 // Peek returns the value corresponding to the provided key, if it exists in
 // the cache. Also returns a boolean indicating whether or not it exists. The
 // item's position in the list of recently-used items is not updated (see Get).
-func (c *Cache) Peek(key interface{}) (val int, ok bool) {
+func (c *Cache) Peek(key interface{}) (val interface{}, ok bool) {
 	c.lock.RLock()
 	defer c.lock.RUnlock()
 
@@ -356,7 +358,7 @@ func (c *Cache) Remove(key interface{}) (ok bool) {
 
 	if e, ok := c.items[key]; ok {
 		c.remove(e)
-		c.size -= e.val
+		c.size -= e.size
 		return true
 	}
 	return false
@@ -559,14 +561,19 @@ func (c *Cache) drainUpdates() {
 	}
 }
 
-func (c *Cache) evict() {
+func (c *Cache) evict() (key interface{}){
 	e := c.evtBack()
+//	k := e.key
 	if e != &c.evtRoot {
 		c.remove(e)
+		c.size -= e.size
+		
 		if c.onEvict != nil {
 			c.onEvict(e.key, e.val)
 		}
 	}
+	return
+//	return k
 }
 
 func (c *Cache) remove(e *entry) {
